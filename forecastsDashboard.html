@@ -1,0 +1,327 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Country Dashboard</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/moment@2.29.1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.2.1/dist/chartjs-plugin-annotation.min.js"></script>
+
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 10px; }
+    .country-container { display:none; }
+    .country-container.active { display:block; overflow-y:auto; max-height:90vh; }
+    .chart-container {
+      width:100%;
+      height:50vh;
+      min-height:500px;
+      margin-bottom:40px;
+      
+    }
+    canvas { width:100% !important; height:100% !important; background:rgba(255,255,255,0.95); }
+    .filter-buttons, .date-range { margin:10px 0; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    button { padding:8px 15px; border:none; border-radius:12px; cursor:pointer; background:#007bff; color:#fff; }
+    button:hover { background:#cce5ff; color:#000; }
+    input[type="date"] { padding:5px; border-radius:4px; border:1px solid #ccc; }
+    .header-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .header-bar .title { font-size:1rem; margin:0; }
+  </style>
+</head>
+
+<body>
+  <div class="header-bar">
+    <h2 class="title">Country Dashboard</h2>
+    <label for="countrySelect">Select Country:</label>
+    <select id="countrySelect" onchange="switchCountry()">
+      <option value="AT">AT</option><option value="BE">BE</option><option value="CH">CH</option><option value="CZ">CZ</option><option value="DE">DE</option><option value="DK">DK</option><option value="FR">FR</option><option value="IT">IT</option><option value="NL">NL</option><option value="NO">NO</option><option value="PL">PL</option><option value="SE">SE</option>
+    </select>
+  </div>
+
+  <div id="dashboardRoot"></div>
+
+<script>
+  const charts = {};
+  const loadedCountries = new Set();
+
+  const nightTimePlugin = {
+    id: 'nightTimeBackground',
+    beforeDraw: (chart) => {
+      const ctx = chart.ctx, ca = chart.chartArea, x = chart.scales.x;
+      if (!ca || !x) return;
+
+      const isNight = d => {
+        const h = new Date(d).getHours();
+        return h >= 21 || h < 5;
+      };
+
+      const vis = chart.data.labels.map(l => ({
+        d: new Date(l),
+        x: x.getPixelForValue(new Date(l))
+      }));
+
+      if (vis.length <= 1) return;
+
+      let inZone = false;
+      let start = null;
+
+      for (let i = 0; i < vis.length; i++) {
+        const night = isNight(vis[i].d);
+
+        if (night && !inZone) {
+          inZone = true;
+          start = vis[i].x;
+        }
+
+        if ((!night && inZone) || (night && inZone && i === vis.length - 1)) {
+          inZone = false;
+          const end = i === vis.length - 1 ? ca.right : vis[i].x;
+          ctx.fillStyle = 'rgba(0,0,0,0.1)';
+          ctx.fillRect(start, ca.top, end - start, ca.bottom - ca.top);
+        }
+      }
+    }
+  };
+
+  const negativeAreaPlugin = {
+    id: 'negativeAreaBackground',
+    beforeDraw: (chart) => {
+      const ctx = chart.ctx, ca = chart.chartArea, y = chart.scales.y;
+      if (!ca || !y) return;
+
+      const zeroY = y.getPixelForValue(0);
+
+      if (zeroY >= ca.top && zeroY <= ca.bottom) {
+        ctx.fillStyle = 'rgba(255,0,0,0.1)';
+        ctx.fillRect(ca.left, zeroY, ca.right - ca.left, ca.bottom - zeroY);
+      }
+    }
+  };
+
+  async function loadCountry(cc) {
+    if (loadedCountries.has(cc)) return;
+
+    const response = await fetch(`data/${cc}.json?v=${Date.now()}`);
+
+    if (!response.ok) {
+      throw new Error(`Could not load data/${cc}.json`);
+    }
+
+    const payload = await response.json();
+    createCountrySection(payload);
+    loadedCountries.add(cc);
+  }
+
+  function createCountrySection(payload) {
+    const root = document.getElementById("dashboardRoot");
+
+    const container = document.createElement("div");
+    container.id = "container_" + payload.cc;
+    container.className = "country-container";
+
+    payload.graphs.forEach((graph, idx) => {
+      container.insertAdjacentHTML("beforeend", `
+        <h3>${graph.title}</h3>
+
+        <div class="filter-buttons">
+          <button onclick="filterData('${payload.cc}', ${idx}, 'all')">All Data</button>
+          <button onclick="filterData('${payload.cc}', ${idx}, '30days')">Last 30 Days</button>
+          <button onclick="filterData('${payload.cc}', ${idx}, '7days')">Last 7 Days</button>
+          <button onclick="filterData('${payload.cc}', ${idx}, '48hours')">Last 48 Hours</button>
+        </div>
+
+        <div class="date-range">
+          <span>Date From:</span>
+          <input type="date" id="dateFrom_${payload.cc}_${idx}" onchange="updateDateRange('${payload.cc}', ${idx})">
+
+          <span>Date To:</span>
+          <input type="date" id="dateTo_${payload.cc}_${idx}" onchange="updateDateRange('${payload.cc}', ${idx})">
+        </div>
+
+        <div class="chart-container">
+          <canvas id="chart_${payload.cc}_${idx}"></canvas>
+        </div>
+      `);
+    });
+
+    root.appendChild(container);
+
+    payload.graphs.forEach((graph, idx) => {
+      initChart(payload.cc, idx, payload.labels, graph);
+    });
+  }
+
+  function initChart(cc, idx, labels, graph) {
+    const key = cc + "_" + idx;
+    const ctx = document.getElementById("chart_" + key).getContext("2d");
+
+    const dates = labels.map(l => new Date(l));
+    const maxDate = new Date(Math.max(...dates));
+    const minDate = new Date(Math.min(...dates));
+
+    document.getElementById("dateFrom_" + key).value = minDate.toISOString().split("T")[0];
+    document.getElementById("dateTo_" + key).value = maxDate.toISOString().split("T")[0];
+
+    const colors = [
+      "#0056b3B3",
+      "#ffa831",
+      "#82cdb1",
+      "#f5c0ee",
+      "#A674B0"
+    ];
+
+    const chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: graph.datasets.map((ds, i) => ({
+          label: ds.label,
+          data: ds.data,
+          borderColor: colors[i],
+          borderWidth: 2.4,
+          pointRadius: 0,
+          fill: false,
+          tension: 0.1
+        }))
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: "nearest", intersect: false, axis: "x" },
+        plugins: {
+          tooltip: {
+            enabled: true,
+            position: "nearest",
+            yAlign: "top",
+            xAlign: "center",
+            caretPadding: 16,
+            backgroundColor: "rgba(0,0,0,0.56)",
+            callbacks: {
+              title: items => moment(items[0].label).format("MMM D, YYYY HH:mm"),
+              label: ctx => (ctx.dataset.label ? ctx.dataset.label + ": " : "") + ctx.parsed.y
+            }
+          },
+          annotation: {
+            annotations: {
+              endLine: {
+                type: "line",
+                xMin: maxDate,
+                xMax: maxDate,
+                borderColor: "#808080",
+                borderWidth: 2,
+                label: { enabled: false }
+              }
+            }
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            title: { display: true, text: graph.title },
+            grid: { color: "#cccccc", drawOnChartArea: true }
+          },
+          x: {
+            type: "time",
+            time: { unit: "hour", displayFormats: { hour: "MMM D, HH:mm" } },
+            grid: { display: false }
+          }
+        }
+      },
+      plugins: [nightTimePlugin, negativeAreaPlugin]
+    });
+
+    charts[key] = {
+      chart: chart,
+      labels: labels,
+      datasets: graph.datasets.map(ds => ds.data),
+      dates: dates,
+      minDate: minDate,
+      maxDate: maxDate,
+      filter: "7days"
+    };
+
+    filterData(cc, idx, "7days");
+  }
+
+  function filterData(cc, idx, period) {
+    const key = cc + "_" + idx;
+    const obj = charts[key];
+
+    if (!obj) return;
+
+    let cutoff = null;
+
+    if (period === "30days") cutoff = new Date(obj.maxDate - 30 * 24 * 60 * 60 * 1000);
+    if (period === "7days") cutoff = new Date(obj.maxDate - 7 * 24 * 60 * 60 * 1000);
+    if (period === "48hours") cutoff = new Date(obj.maxDate - 48 * 60 * 60 * 1000);
+    if (period === "all") cutoff = obj.minDate;
+
+    obj.filter = period;
+
+    const idxs = obj.dates
+      .map((d, i) => d >= cutoff ? i : -1)
+      .filter(i => i >= 0);
+
+    applyVisibleIndexes(key, obj, idxs);
+  }
+
+  function updateDateRange(cc, idx) {
+    const key = cc + "_" + idx;
+    const obj = charts[key];
+
+    if (!obj) return;
+
+    const from = new Date(document.getElementById("dateFrom_" + key).value + "T00:00:00");
+    const to = new Date(document.getElementById("dateTo_" + key).value + "T23:00:00");
+
+    const idxs = obj.dates
+      .map((d, i) => d >= from && d <= to ? i : -1)
+      .filter(i => i >= 0);
+
+    applyVisibleIndexes(key, obj, idxs);
+  }
+
+  function applyVisibleIndexes(key, obj, idxs) {
+    if (!idxs.length) return;
+
+    const minF = new Date(obj.labels[idxs[0]]);
+    const maxF = new Date(obj.labels[idxs[idxs.length - 1]]);
+
+    document.getElementById("dateFrom_" + key).value = minF.toISOString().split("T")[0];
+    document.getElementById("dateTo_" + key).value = maxF.toISOString().split("T")[0];
+
+    obj.chart.options.plugins.annotation.annotations.endLine.xMin = maxF;
+    obj.chart.options.plugins.annotation.annotations.endLine.xMax = maxF;
+    obj.chart.options.scales.x.min = minF;
+    obj.chart.options.scales.x.max = maxF;
+
+    obj.chart.data.labels = idxs.map(i => obj.labels[i]);
+
+    obj.chart.data.datasets.forEach((dataset, dsIdx) => {
+      dataset.data = idxs.map(i => obj.datasets[dsIdx][i]);
+    });
+
+    obj.chart.update("none");
+  }
+
+  async function switchCountry() {
+    const val = document.getElementById("countrySelect").value;
+
+    await loadCountry(val);
+
+    document.querySelectorAll(".country-container").forEach(el => {
+      el.classList.remove("active");
+    });
+
+    document.getElementById("container_" + val).classList.add("active");
+
+    Object.values(charts).forEach(o => o.chart.resize());
+  }
+
+  switchCountry();
+</script>
+</body>
+</html>
