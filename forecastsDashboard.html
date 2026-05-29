@@ -101,33 +101,73 @@
     }
   };
 
-  async function loadCountry(cc) {
-  if (loadedCountries.has(cc)) return;
+  let dashboardManifest = null;
 
-  const errorBox = document.getElementById("dashboardError");
-  errorBox.textContent = "";
+    async function loadManifest() {
+    if (dashboardManifest) return dashboardManifest;
 
-  try {
-    const response = await fetch(`data/${cc}.json?v=${Date.now()}`);
+    const response = await fetch(`data/manifest.json?v=${Date.now()}`);
 
     if (!response.ok) {
-      throw new Error(`Could not load data/${cc}.json. HTTP status: ${response.status}`);
+        throw new Error(`Could not load data/manifest.json. HTTP status: ${response.status}`);
     }
 
-    const payload = await response.json();
-
-    if (!payload.graphs || payload.graphs.length === 0) {
-      throw new Error(`Loaded data/${cc}.json, but it contains no graphs.`);
+    dashboardManifest = await response.json();
+    return dashboardManifest;
     }
 
-    createCountrySection(payload);
-    loadedCountries.add(cc);
+    async function loadCountry(cc) {
+    if (loadedCountries.has(cc)) return;
 
-  } catch (err) {
-    console.error(err);
-    errorBox.textContent = err.message;
-  }
-}
+    const errorBox = document.getElementById("dashboardError");
+    errorBox.textContent = "";
+
+    try {
+        const manifest = await loadManifest();
+
+        const countryInfo = manifest.countries.find(c => c.cc === cc);
+
+        if (!countryInfo) {
+        throw new Error(`Country ${cc} was not found in data/manifest.json.`);
+        }
+
+        if (!countryInfo.graphs || countryInfo.graphs.length === 0) {
+        throw new Error(`Country ${cc} has no graph JSON files.`);
+        }
+
+        const graphs = [];
+        let labels = null;
+
+        for (const graphInfo of countryInfo.graphs) {
+        const response = await fetch(`data/${graphInfo.file}?v=${Date.now()}`);
+
+        if (!response.ok) {
+            throw new Error(`Could not load data/${graphInfo.file}. HTTP status: ${response.status}`);
+        }
+
+        const graphPayload = await response.json();
+
+        if (!labels) {
+            labels = graphPayload.labels;
+        }
+
+        graphs.push(graphPayload.graph);
+        }
+
+        const payload = {
+        cc: cc,
+        labels: labels,
+        graphs: graphs
+        };
+
+        createCountrySection(payload);
+        loadedCountries.add(cc);
+
+    } catch (err) {
+        console.error(err);
+        errorBox.textContent = err.message;
+    }
+    }
 
   function createCountrySection(payload) {
     const root = document.getElementById("dashboardRoot");
